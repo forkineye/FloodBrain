@@ -49,7 +49,7 @@
 /* XUSART Config */
 #define USART_BAUDRATE  115200      /* Default RS485 baudrate */
 
-/* RingBuffer Config */
+/* RingBuffer Config -- NOT CURRENTLY USED */
 #define BUFFER_SIZE     255         /* Ringbuffer size */
 
 /* Pin configuration for FloodBrain

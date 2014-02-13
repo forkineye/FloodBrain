@@ -53,7 +53,6 @@ xusart_config_t xusart_config = {
 
 uint64_t            addr_p0 = ADDR_P0;      /* Default nRF address for TX and Pipe 0 RX */
 uint64_t            addr_p1 = ADDR_P1;      /* Default nRF address for Pipe 1 RX */
-RingBuff_t          ringbuff;               /* Ring buffer to hold our data */
 volatile uint8_t    rxbuff[32];             /* Packet buffer */
 volatile bool       DFLAG = false;          /* Data ready flag */
 bool                WIRELESS = false;       /* Flag to tell if we're wireless or not */
@@ -71,9 +70,6 @@ void setup_rs485() {
     xusart_enable_tx(xusart_config.usart);                              /* Enable module TX */
     xusart_enable_rx(xusart_config.usart);                              /* Enable module RX */
     
-    // Setup USART RX interrupt handling
-    xusart_config.usart->CTRLA = ((xusart_config.usart->CTRLA & ~USART_RXCINTLVL_gm) | USART_RXCINTLVL_LO_gc);
-
     // Single pulse to let us know we're in RS485 mode    
     LED_STATUS_ON;
     _delay_ms(250);
@@ -93,16 +89,16 @@ void setup_nrf() {
     xnrf_set_rx0_address(&xnrf_config, (uint8_t*)&addr_p0); /* Set Pipe 0 address */
     xnrf_set_rx1_address(&xnrf_config, (uint8_t*)&addr_p1); /* Set Pipe 1 address */
 
+    // Setup nRF for listening
+    xnrf_config_rx(&xnrf_config);   /* Configure nRF for RX mode */
+    xnrf_powerup(&xnrf_config);     /* Power-up the nRF */
+    _delay_ms(5);                   /* Let the radio stabilize - Section 6.1.7 - Tpd2stdby */
+
     // Setup pin change interrupt handling for the nRF on PC2
     PORTC_PIN2CTRL = PORT_ISC_FALLING_gc;   /* Setup PC2 to sense falling edge */
     PORTC.INTMASK = PIN2_bm;                /* Enable pin change interrupt for PC2 */
     PORTC.INTCTRL = PORT_INTLVL_LO_gc;      /* Set Port C for low level interrupts */
 
-    // Initialize listening on both RS485 line and nRF.  First in determines bridge direction
-    xnrf_config_rx(&xnrf_config);   /* Configure nRF for RX mode */
-    xnrf_powerup(&xnrf_config);     /* Power-up the nRF */
-    _delay_ms(5);                   /* Let the radio stabilize - Section 6.1.7 - Tpd2stdby */
-    
     // Double pulse to let us know we're in nRF mode
     LED_STATUS_ON;
     _delay_ms(250);
@@ -126,18 +122,15 @@ void init() {
     CLK.CTRL = CLK_SCLKSEL_RC32M_gc;                /* Switch to 32MHz clock */
     OSC.CTRL &= ~OSC_RC2MEN_bm;                     /* Disable 2Mhz oscillator */
 
-    // Initialize ring buffer
-    RingBuffer_InitBuffer(&ringbuff);
-    
-    // Setup Status LEDs
+     // Setup Status LEDs
     PORTC.DIRSET = PIN0_bm | PIN1_bm;
     LED_STATUS_OFF;
     LED_DATA_OFF;
 
     // Setup PWM outputs and initialize buffers
-    PORTA.DIR = 0xFF; PORTA.OUT = 0xFF;     /* Channels 1-8 */
-    PORTD.DIR = 0xFF; PORTD.OUT = 0xFF;     /* Channels 9-16 */
-    PORTR.DIR = 0x03; PORTR.OUT = 0x03;     /* Channels 17 & 18 */
+    PORTA.DIR = 0xFF;   /* Channels 1-8 */
+    PORTD.DIR = 0xFF;   /* Channels 9-16 */
+    PORTR.DIR = 0x03;   /* Channels 17 & 18 */
     for (uint8_t i=0; i<NUM_CHANNELS; i++) {
         compare[i] = 0;
         compbuff[i] = 0;
@@ -157,10 +150,9 @@ void init() {
     TCC4.INTCTRLA = TC45_OVFINTLVL_MED_gc;  /* Setup TCC4 Overflow Interrupt - Medium level */
         
     // Enable interrupts and start PWM timer
-    PMIC.CTRL |= PMIC_LOLVLEN_bm;       /* Enable low level interrupts */
-    sei();                              /* Enable global interrupt flag */
-    TCC4.CTRLA = TC45_CLKSEL_DIV2_gc;   /* Start the PWM timer */
-
+    PMIC.CTRL |= PMIC_LOLVLEN_bm | PMIC_MEDLVLEN_bm;    /* Enable low level interrupts */
+    sei();                                              /* Enable global interrupt flag */
+    TCC4.CTRLA = TC45_CLKSEL_DIV2_gc;                   /* Start the PWM timer */
 }
 
 /* Software PWM routine from AVR136 */
@@ -229,77 +221,66 @@ ISR(PORTC_INT_vect) {
     DFLAG = true;                                                           /* Set out data ready flag */
 }
 
-/* Interrupt handler for USART RX on Port C */
-ISR(USARTC0_RXC_vect) {
-    RingBuffer_Insert(&ringbuff, xusart_getchar(xusart_config.usart));      /* get the byte */
+/* Process a Renard packet */
+void procRenard() {
+    uint8_t data;
+    uint8_t channel = 0;
+    
+    /* Process for Renard data */
+    while (channel < NUM_CHANNELS) {
+        data = xusart_getchar(&USARTC0);
+        switch (data) {
+            case RENARD_PAD:    /* Ignore PAD bytes */
+                break;
+            case RENARD_ESCAPE: /* Process escaped bytes */
+                data = xusart_getchar(&USARTC0);
+                switch (data) {
+                    case RENARD_ESC_7D:
+                        compbuff[channel] = 0x7D;
+                        break;
+                    case RENARD_ESC_7E:
+                        compbuff[channel] = 0x7E;
+                        break;
+                    case RENARD_ESC_7F:
+                        compbuff[channel] = 0x7F;
+                        break;
+                }
+                channel++;
+                break;
+            default:            /* Hopefully it's just good ol' channel data! */
+                compbuff[channel] = data;
+                channel++;
+        }
+    }
 }
 
 /* Loop for parsing Renard data */
 void renard_loop() {
-    uint8_t data;                       /* Byte we're processing */
-    uint8_t channel = 0;                /* Channel we're on */
-    renstate_t state = RENSTATE_NULL;   /* Renard state machine control */
-
+    uint8_t data;
+    
     while(1) {
-        while(!ringbuff.Count);                 /* Spin our wheels until the buffer has data */
+        /* Poll and retransmit while waiting for the sync byte */
+        while ((data = xusart_getchar(&USARTC0)) != RENARD_SYNC)
+            xusart_putchar(&USARTC0, data);
         
         LED_DATA_ON;
-        data = RingBuffer_Remove(&ringbuff);    /* Grab a byte off the buffer */
-
-        /* Process special characters and set states if needed */
-        switch(data) {
-            case RENARD_PAD:                    /* Ignore PAD bytes and for next byte */
-                continue;
-            case RENARD_SYNC:                   /* Set our state to SYNC and wait for next byte */
-                channel = 0;                    /* Reset out channel counter */
-                xusart_putchar(&USARTC0, data); /* Forward the SYNC byte */
-                state = RENSTATE_SYNC;
-                continue;
-            case RENARD_ESCAPE:                 /* Set our state to ESCAPE and wait for next byte */
-                state = RENSTATE_ESCAPE;
-                continue;
-            default:;
-        }
-
-        /* Renard state machine */
-        switch (state) {
-            case RENSTATE_PASS:                     /* We're in the PASS state. */
-                xusart_putchar(&USARTC0, data);     /* So just forward data and jump out */
-                continue;                               
-            case RENSTATE_ESCAPE:                   /* We're in ESCAPE state. */
-                switch (data) {                     /* Process characters per Renard protocol and set state to NULL. */
-                    case RENARD_ESC_7D:
-                        data = 0x7D;
-                        break;
-                    case RENARD_ESC_7E:
-                        data = 0x7E;
-                        break;
-                    case RENARD_ESC_7F:
-                        data = 0x7F;
-                        break;
-                }
-                state = RENSTATE_NULL;
-                break;
-            case RENSTATE_SYNC:                     /* We're in a SYNC state.  Check if this stream is for us. */
-                if(data == RENARD_ADDR) {           /* It's for us, so... */
-                    state = RENSTATE_NULL;          /* Set to a NULL state */
-                } else if (data > RENSTATE_ADDR) {  /* Or, it's for a downstream device. */
-                    data--;                         /* Decrement address */
-                    xusart_putchar(&USARTC0, data); /* Send the new address */
-                    state = RENSTATE_PASS;          /* Go into PASS state */
-                } else {                            /* Else, it's unknown */
-                    xusart_putchar(&USARTC0, data); /* So we forward it...  */
-                    state = RENSTATE_PASS;          /* And go into PASS state */
-                }
-                continue;                           /* Jump out */
-            default:;
+        
+        /* Retransmit the sync byte */
+        xusart_putchar(&USARTC0, RENARD_SYNC);
+		
+        /* Evaluate command byte */
+        data = xusart_getchar(&USARTC0);
+        if (data == RENARD_ADDR) {			/* Process a Renard packet for this device */
+            procRenard();
+        } else if (data > RENARD_ADDR) {	/* It's for a downstream device */
+            data--;                         /* Decrement the address */
+            xusart_putchar(&USARTC0, data); /* And forward it */
+        } else {							/* Unsupported */
+            xusart_putchar(&USARTC0, data); /* So Forward it */
         }
         
-        /* What's left is channel data! */
-        compbuff[channel++] = data;
-
         LED_DATA_OFF;
-    }
+    }        
 }
 
 /* Loop for parsing RFPixelControl data */
@@ -321,8 +302,13 @@ void rfp_loop() {
 
 /* Main Loop */
 int main(void) {
+    /* Let the power supply stabilize */
+    _delay_ms(100);
+    
+    /* Initialize everything */
     init();
     
+    /* Go! */
     if(WIRELESS)
         rfp_loop();
     else

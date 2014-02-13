@@ -31,11 +31,11 @@
 
 // Renard state machine flags
 typedef enum {
+    RENSTATE_DATA,
     RENSTATE_SYNC,
     RENSTATE_ESCAPE,
     RENSTATE_ADDR,
-    RENSTATE_PASS,
-    RENSTATE_NULL
+    RENSTATE_PASS
 } renstate_t;
 
 #endif /* RENARD_H_ */

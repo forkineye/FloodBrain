@@ -28,9 +28,10 @@ void xnrf_init(xnrf_config_t *xnrf_config, xspi_config_t *xspi_config) {
     xspi_master_init(xspi_config, SPI_MODE_0_gc, false, SPI_PRESCALER_DIV16_gc, true);
 
     // Make sure our nRF is powered, disabled, and stabilized per the datasheet for power-on state transition.
+    xnrf_deselect(xnrf_config);
     xnrf_disable(xnrf_config);
     _delay_ms(100);
-    
+
     // Set default configuration
     xnrf_write_register(xnrf_config, CONFIG, xnrf_config->confbits);
     
