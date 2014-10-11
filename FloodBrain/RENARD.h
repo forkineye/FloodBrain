@@ -29,13 +29,17 @@
 #define RENARD_ESC_7E   0x30    // encoded value for data byte of 7E
 #define RENARD_ESC_7F   0x31    // encoded value for data byte of 7F
 
+// Proposed Renard Command bytes -- < 0x80 */
+#define RENCMD_CONFIG   0x63     // 'c' - Configuration Mode
+
 // Renard state machine flags
 typedef enum {
     RENSTATE_DATA,
     RENSTATE_SYNC,
     RENSTATE_ESCAPE,
     RENSTATE_ADDR,
-    RENSTATE_PASS
+    RENSTATE_PASS,
+    RENSTATE_NULL
 } renstate_t;
 
 #endif /* RENARD_H_ */

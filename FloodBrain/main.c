@@ -51,13 +51,13 @@ xusart_config_t xusart_config = {
     .tx_pin = 7
 };
 
-uint64_t            addr_p0 = ADDR_P0;      /* Default nRF address for TX and Pipe 0 RX */
-uint64_t            addr_p1 = ADDR_P1;      /* Default nRF address for Pipe 1 RX */
-volatile uint8_t    rxbuff[32];             /* Packet buffer */
-volatile bool       DFLAG = false;          /* Data ready flag */
-bool                WIRELESS = false;       /* Flag to tell if we're wireless or not */
-uint8_t             compare[NUM_CHANNELS];  /* Channel data for PWM */
-volatile uint8_t    compbuff[NUM_CHANNELS]; /* Buffer to feed PWM data */
+uint64_t            addr_p0 = ADDR_P0;          /* Default nRF address for TX and Pipe 0 RX */
+uint64_t            addr_p1 = ADDR_P1;          /* Default nRF address for Pipe 1 RX */
+volatile uint8_t    rxbuff[32];                 /* Packet buffer */
+volatile bool       DFLAG = false;              /* Data ready flag */
+bool                WIRELESS = false;           /* Flag to tell if we're wireless or not */
+uint8_t             compare[NUM_CHANNELS];      /* Channel data for PWM */
+volatile uint8_t    compbuff[NUM_CHANNELS];     /* Buffer to feed PWM data */
 
 /* Configure for RS485 / Renard mode */
 void setup_rs485() {
@@ -257,8 +257,14 @@ void procRenard() {
 /* Loop for parsing Renard data */
 void renard_loop() {
     uint8_t data;
+    bool    forward = false;
     
     while(1) {
+        if (forward) {
+            xusart_putchar(&USARTC0, RENARD_ADDR);
+            forward = false;
+        }
+
         /* Poll and retransmit while waiting for the sync byte */
         while ((data = xusart_getchar(&USARTC0)) != RENARD_SYNC)
             xusart_putchar(&USARTC0, data);
@@ -272,6 +278,7 @@ void renard_loop() {
         data = xusart_getchar(&USARTC0);
         if (data == RENARD_ADDR) {			/* Process a Renard packet for this device */
             procRenard();
+            forward = true;
         } else if (data > RENARD_ADDR) {	/* It's for a downstream device */
             data--;                         /* Decrement the address */
             xusart_putchar(&USARTC0, data); /* And forward it */
